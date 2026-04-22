@@ -8,5 +8,31 @@ services:
       - "8001:8000"
     env_file:
       - .env
+    environment:
+      DATABASE_URL: postgresql://known_gap:known_gap@postgres:5432/known_gap
     volumes:
       - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: known-gap-postgres
+    environment:
+      POSTGRES_USER: known_gap
+      POSTGRES_PASSWORD: known_gap
+      POSTGRES_DB: known_gap
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./src/known_gap/infrastructure/db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U known_gap -d known_gap"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres-data:
