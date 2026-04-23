@@ -30,11 +30,35 @@ class TestChunker:
         chunker = Chunker(chunk_size=10, chunk_overlap=4)
         text = "abcdefghijklmnop"
         chunks = chunker.chunk(text)
-        # Second chunk starts at step = 6, so its first 4 chars overlap
-        # with the last 4 chars of the first chunk.
         assert len(chunks) >= 2
         assert text[6:10] in chunks[0].content
         assert text[6:10] in chunks[1].content
+
+    def test_respects_word_boundaries_when_possible(self) -> None:
+        chunker = Chunker(chunk_size=25, chunk_overlap=5)
+        text = "the quick brown fox jumps over the lazy dog very fast"
+        source_words = set(text.split())
+        chunks = chunker.chunk(text)
+        assert len(chunks) >= 2
+        for chunk in chunks:
+            for word in chunk.content.split():
+                assert word in source_words, f"partial word {word!r} in {chunk.content!r}"
+
+    def test_prefers_paragraph_then_sentence_boundaries(self) -> None:
+        chunker = Chunker(chunk_size=30, chunk_overlap=5)
+        text = "Alpha paragraph.\n\nBeta paragraph.\n\nGamma paragraph."
+        chunks = chunker.chunk(text)
+        # Each chunk content must be reconstructible from whole words only.
+        source_words = set(text.replace("\n\n", " ").split())
+        for chunk in chunks:
+            for word in chunk.content.split():
+                assert word in source_words
+
+    def test_falls_back_to_char_split_for_long_unbroken_words(self) -> None:
+        chunker = Chunker(chunk_size=5, chunk_overlap=1)
+        chunks = chunker.chunk("supercalifragilistic")
+        assert len(chunks) > 1
+        assert all(len(c.content) <= 5 for c in chunks)
 
     def test_invalid_overlap_raises(self) -> None:
         with pytest.raises(ValueError):
