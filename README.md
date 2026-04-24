@@ -143,7 +143,7 @@ CI runs the same four checks on every push (`.github/workflows/ci.yml`).
 
 ## Project Structure
 
-```
+```text
 src/known_gap/
 ├── api/                  # FastAPI endpoints, schemas, DI
 ├── application/
