@@ -19,6 +19,7 @@ dependencies = [
     "anthropic>=0.96.0",
     "google-genai>=1.73.1",
     "falkordb>=1.6.0",
+    "pyjwt[crypto]>=2.12.1",
 ]
 
 [dependency-groups]

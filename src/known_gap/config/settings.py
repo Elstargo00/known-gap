@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     falkordb_username: str = ""
     falkordb_password: str = ""
 
+    jwt_secret: str = ""
+    jwt_algorithm: str = "HS256"
+
 
 @lru_cache
 def get_settings() -> Settings:
