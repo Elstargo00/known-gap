@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 
+from src.known_gap.api.endpoints.ask import router as ask_router
 from src.known_gap.api.endpoints.ingest import router as ingest_router
 from src.known_gap.config.settings import get_settings
 from src.known_gap.infrastructure.db.pool import create_pool
@@ -36,6 +37,7 @@ async def health() -> dict[str, str]:
 
 
 app.include_router(ingest_router)
+app.include_router(ask_router)
 
 
 if __name__ == "__main__":
