@@ -24,6 +24,14 @@ class Settings(BaseSettings):
 
     max_upload_mb: int = 20
 
+    anthropic_api_key: str = ""
+    gemini_api_key: str = ""
+    llm_primary_model: str = "claude-sonnet-4-6"
+    llm_fallback_model: str = "gemini-2.5-flash"
+    answer_max_tokens: int = 1024
+
+    top_k: int = 10
+
 
 @lru_cache
 def get_settings() -> Settings:
