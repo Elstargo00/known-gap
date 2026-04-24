@@ -1,7 +1,9 @@
+from typing import cast
+
 from fastapi import APIRouter, HTTPException
 
-from src.known_gap.api.dependencies import AskHandlerDep
-from src.known_gap.api.schemas.ask import AskRequest, AskResponse, Source
+from src.known_gap.api.dependencies import AskHandlerDep, CurrentUserId
+from src.known_gap.api.schemas.ask import AskMode, AskRequest, AskResponse, ConceptView, Source
 from src.known_gap.application.use_cases.ask.command import AskCommand
 from src.known_gap.shared.exceptions.base import AppException
 
@@ -12,8 +14,9 @@ router = APIRouter()
 async def ask(
     request: AskRequest,
     handler: AskHandlerDep,
+    user_id: CurrentUserId,
 ) -> AskResponse:
-    command = AskCommand(query=request.query, mode=request.mode)
+    command = AskCommand(user_id=user_id, query=request.query, mode=request.mode)
     try:
         result = await handler.execute(command)
     except AppException as e:
@@ -31,5 +34,13 @@ async def ask(
             )
             for source in result.sources
         ],
-        mode=result.mode,
+        mode=cast(AskMode, result.mode),
+        known_concepts=[
+            ConceptView(canonical_name=c.canonical_name, display_name=c.display_name)
+            for c in result.known_concepts
+        ],
+        unknown_concepts=[
+            ConceptView(canonical_name=c.canonical_name, display_name=c.display_name)
+            for c in result.unknown_concepts
+        ],
     )

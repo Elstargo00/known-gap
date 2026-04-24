@@ -10,6 +10,7 @@ from src.known_gap.api.endpoints.ask import router as ask_router
 from src.known_gap.api.endpoints.ingest import router as ingest_router
 from src.known_gap.config.settings import get_settings
 from src.known_gap.infrastructure.db.pool import create_pool
+from src.known_gap.infrastructure.graph.falkordb_client import create_falkordb_client
 
 settings = get_settings()
 
@@ -17,6 +18,7 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.pool = await create_pool(settings.database_url)
+    app.state.graph_client = create_falkordb_client(settings)
     try:
         yield
     finally:

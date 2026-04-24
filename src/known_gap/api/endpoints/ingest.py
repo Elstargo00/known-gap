@@ -3,7 +3,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
-from src.known_gap.api.dependencies import IngestHandlerDep, SettingsDep
+from src.known_gap.api.dependencies import CurrentUserId, IngestHandlerDep, SettingsDep
 from src.known_gap.api.schemas.ingest import IngestResponse
 from src.known_gap.application.use_cases.ingest_document.command import IngestDocumentCommand
 from src.known_gap.shared.exceptions.base import AppException
@@ -19,6 +19,7 @@ UploadedFile = Annotated[UploadFile, File(...)]
 async def ingest(
     handler: IngestHandlerDep,
     settings: SettingsDep,
+    user_id: CurrentUserId,  # noqa: ARG001 — auth gate; documents are global
     file: UploadedFile,
 ) -> IngestResponse:
     if not file.filename:
