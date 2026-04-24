@@ -32,6 +32,14 @@ class Settings(BaseSettings):
 
     top_k: int = 10
 
+    concept_extraction_model: str = "claude-haiku-4-5-20251001"
+    concept_extraction_max_tokens: int = 1024
+
+    falkordb_host: str = "localhost"
+    falkordb_port: int = 6379
+    falkordb_username: str = ""
+    falkordb_password: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:
