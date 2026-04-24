@@ -1,7 +1,8 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import Depends, Header, HTTPException, Request
+from fastapi import Depends, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from src.known_gap.application.services.answer_post_processor import AnswerPostProcessor
 from src.known_gap.application.services.chunker import Chunker
@@ -41,19 +42,20 @@ def get_jwt_verifier(settings: SettingsDep) -> JWTVerifier:
 
 JWTVerifierDep = Annotated[JWTVerifier, Depends(get_jwt_verifier)]
 
+bearer_scheme = HTTPBearer(auto_error=False)
+
 
 def get_current_user_id(
     verifier: JWTVerifierDep,
-    authorization: Annotated[str | None, Header()] = None,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)] = None,
 ) -> UUID:
-    if not authorization or not authorization.startswith("Bearer "):
+    if credentials is None:
         raise HTTPException(
             status_code=401,
-            detail="Authorization header must be 'Bearer <token>'",
+            detail="Missing or invalid Authorization header",
         )
-    token = authorization.removeprefix("Bearer ").strip()
     try:
-        return verifier.verify(token)
+        return verifier.verify(credentials.credentials)
     except AppException as e:
         raise HTTPException(status_code=e.http_status_code, detail=e.message) from e
 

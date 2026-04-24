@@ -18,3 +18,4 @@ tests/
 .claude/
 data/
 *.md
+!README.md

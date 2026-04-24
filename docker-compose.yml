@@ -10,10 +10,17 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql://known_gap:known_gap@postgres:5432/known_gap
+      FALKORDB_HOST: falkordb
+      FALKORDB_PORT: "6379"
+      FALKORDB_USERNAME: ""
+      FALKORDB_PASSWORD: ""
     volumes:
       - .:/app
+      - /app/.venv
     depends_on:
       postgres:
+        condition: service_healthy
+      falkordb:
         condition: service_healthy
 
   postgres:
@@ -34,5 +41,20 @@ services:
       timeout: 3s
       retries: 10
 
+  falkordb:
+    image: falkordb/falkordb:latest
+    container_name: known-gap-falkordb
+    ports:
+      - "6380:6379"
+      - "3000:3000"
+    volumes:
+      - falkordb-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
 volumes:
   postgres-data:
+  falkordb-data:
