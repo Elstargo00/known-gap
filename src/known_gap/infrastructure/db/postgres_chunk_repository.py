@@ -56,6 +56,8 @@ class PostgresChunkRepository(ChunkRepository):
                 query_embedding,
                 k,
             )
+        # <=> cosine distance
+        # identical -> [0, 2] <- opposite
         return [
             RetrievedChunk(
                 chunk_id=row["chunk_id"],
