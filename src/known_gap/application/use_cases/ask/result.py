@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from uuid import UUID
 
 
@@ -12,7 +12,15 @@ class AskSource:
 
 
 @dataclass(frozen=True)
+class AskConcept:
+    canonical_name: str
+    display_name: str
+
+
+@dataclass(frozen=True)
 class AskResult:
     answer: str
     sources: list[AskSource]
     mode: str
+    known_concepts: list[AskConcept] = field(default_factory=list)
+    unknown_concepts: list[AskConcept] = field(default_factory=list)
