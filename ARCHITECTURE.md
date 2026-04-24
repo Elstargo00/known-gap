@@ -55,7 +55,7 @@ Each component is evaluated against the three production-readiness axes from
 the assignment: **availability**, **scalability**, **cost optimisation**.
 
 | Component | Service | Role | Availability | Scalability | Cost stance |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | API | **Cloud Run** | Stateless FastAPI; serves `/ingest` and `/ask` | Managed multi-zone within region; automatic instance replacement | Auto 0→N per request rate; min=1 in demo to avoid cold starts | Pay-per-request + one warm instance; scales to zero when quiet |
 | Relational + vectors | **Cloud SQL (Postgres 17)** | `documents`, `chunks`, HNSW index over `VECTOR(1024)` | Single-zone for demo; flip to HA (regional) for prod with one setting | Start `db-f1-micro` / `db-g1-small`; vertical bump or read replicas later | Smallest burstable tier is adequate for demo traffic |
 | Container images | **Artifact Registry** | Versioned Docker images built in CI | Regional, GA | N/A — cold storage | Per-GB-month; trivial for a single image |
@@ -206,7 +206,7 @@ Voyage, Anthropic, and FalkorDB swappable.
 ## 6. Design Patterns
 
 | Pattern | Where it lives | Why |
-|---|---|---|
+| --- | --- | --- |
 | **Repository** | `domain/repositories/{document,chunk,user_graph}_repository.py` · `infrastructure/db/postgres_*.py` · `infrastructure/graph/falkordb_user_graph_repository.py` | Storage engines (Postgres / FalkorDB) never leak into application or domain code |
 | **Factory** | `infrastructure/embeddings/factory.py` · `infrastructure/llm/factory.py` | Selects and composes providers from settings. `LLMProviderFactory` has two entry points (`from_settings` for generation, `for_concept_extraction` for Haiku) so each use case gets the right-sized model |
 | **Strategy** | `application/strategies/{base,normal,learning,concise}.py` | Each mode owns its own prompt and its response shape. Adding a mode is a new file plus a `dict` entry in DI — no handler changes |
@@ -250,7 +250,7 @@ user. Only the knowledge graph is per-user.
 
 One graph per user, named `user_<uuid.hex>`. Single node label:
 
-```
+```cypher
 (:Concept {
     canonical_name:     string,   // lowercased, trimmed — the identity
     display_name:       string,

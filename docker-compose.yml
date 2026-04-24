@@ -46,7 +46,7 @@ services:
     container_name: known-gap-falkordb
     ports:
       - "6380:6379"
-      - "3000:3000"
+      - "3001:3000"  # FalkorDB browser UI — moved off 3000 so Next.js dev can use it
     volumes:
       - falkordb-data:/data
     healthcheck:
