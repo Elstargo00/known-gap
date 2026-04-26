@@ -27,8 +27,10 @@ services:
     image: pgvector/pgvector:pg17
     container_name: known-gap-postgres
     environment:
-      POSTGRES_USER: known_gap
-      POSTGRES_PASSWORD: known_gap
+      # postgres is the superuser; the app role (known_gap) is created by
+      # 000_create_app_user.sql so local dev mirrors Cloud SQL's role split.
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
       POSTGRES_DB: known_gap
     ports:
       - "5433:5432"
@@ -36,7 +38,7 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./src/known_gap/infrastructure/db/migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U known_gap -d known_gap"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d known_gap"]
       interval: 5s
       timeout: 3s
       retries: 10
