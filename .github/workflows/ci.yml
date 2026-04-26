@@ -1,4 +1,4 @@
-name: CI
+name: CI/CD
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  checks:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,3 +34,65 @@ jobs:
       - name: Pytest
         run: uv run pytest
 
+  deploy:
+    name: Deploy to Cloud Run
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    # id-token: write is required so GitHub mints an OIDC token that GCP can
+    # exchange for short-lived credentials via Workload Identity Federation.
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      PROJECT_ID: known-gap-494319-h7
+      REGION: asia-southeast1
+      AR_REPO: known-gap
+      IMAGE_NAME: api
+      SERVICE: known-gap-api
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.CI_SA_EMAIL }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Compute image URI
+        id: image
+        run: |
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${IMAGE_NAME}:${GITHUB_SHA}"
+          echo "uri=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "Image: ${IMAGE}"
+
+      - name: Build and push to Artifact Registry
+        run: |
+          gcloud builds submit \
+            --config=cloudbuild.yaml \
+            --substitutions=_IMAGE=${{ steps.image.outputs.uri }} \
+            --project=${PROJECT_ID}
+
+      - name: Deploy new revision to Cloud Run
+        # Only the image swaps. SA, env vars, secrets, and the Cloud SQL
+        # connection bindings are preserved from the previous revision.
+        run: |
+          gcloud run deploy ${SERVICE} \
+            --image=${{ steps.image.outputs.uri }} \
+            --region=${REGION} \
+            --project=${PROJECT_ID}
+
+      - name: Print deployed service URL
+        run: |
+          URL=$(gcloud run services describe ${SERVICE} \
+            --region=${REGION} \
+            --project=${PROJECT_ID} \
+            --format='value(status.url)')
+          echo "Deployed: ${URL}"
+          echo "Image: ${{ steps.image.outputs.uri }}"
