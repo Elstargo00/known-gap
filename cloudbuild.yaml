@@ -1,0 +1,32 @@
+# Cloud Build pipeline: build the runtime image with BuildKit and push to Artifact Registry.
+#
+# Usage:
+#   gcloud builds submit \
+#     --config=cloudbuild.yaml \
+#     --substitutions=_IMAGE=asia-southeast1-docker.pkg.dev/<project>/<repo>/api:<tag>
+#
+# BuildKit (DOCKER_BUILDKIT=1) is required because the Dockerfile uses
+# `RUN --mount=type=cache` and `--mount=type=bind` to share the uv download
+# cache between builds and to read pyproject.toml / uv.lock without copying
+# them into the image layer. Cloud Build's default "docker build" doesn't
+# enable BuildKit, so we set it explicitly here.
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    env:
+      - DOCKER_BUILDKIT=1
+    args:
+      - build
+      - --tag=${_IMAGE}
+      - .
+
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_IMAGE}
+
+images:
+  - ${_IMAGE}
+
+options:
+  logging: CLOUD_LOGGING_ONLY
