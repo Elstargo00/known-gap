@@ -43,7 +43,7 @@ class AskHandler:
         self,
         embedder: EmbeddingProvider,
         chunks: ChunkRepository,
-        graph_repo: UserGraphRepository,
+        graph: UserGraphRepository,
         classifier: KnowledgeClassifier,
         post_processor: AnswerPostProcessor,
         score_updater: ScoreUpdater,
@@ -55,7 +55,7 @@ class AskHandler:
     ) -> None:
         self._embedder = embedder
         self._chunks = chunks
-        self._graph = graph_repo
+        self._graph = graph
         self._classifier = classifier
         self._post_processor = post_processor
         self._score_updater = score_updater

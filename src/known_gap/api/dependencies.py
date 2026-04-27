@@ -166,7 +166,7 @@ def get_ask_handler(
     return AskHandler(
         embedder=EmbeddingProviderFactory.from_settings(settings),
         chunks=PostgresChunkRepository(pool),
-        graph_repo=graph_repo,
+        graph=graph_repo,
         classifier=classifier,
         post_processor=post_processor,
         score_updater=score_updater,
