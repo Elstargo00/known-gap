@@ -2,23 +2,29 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from src.known_gap.domain.models.concept import ConceptMention
+from langchain_core.tools import BaseTool
+
+from src.known_gap.application.services.tool_enabled_answerer import ToolEnabledAnswerer
+from src.known_gap.domain.models.concept import Concept, ConceptMention
 from src.known_gap.domain.models.retrieved_chunk import RetrievedChunk
-from src.known_gap.domain.services.llm_provider import LLMProvider
 
 
 @dataclass(frozen=True)
 class StrategyContext:
     query: str
     retrieved: Sequence[RetrievedChunk]
-    known: Sequence[ConceptMention]
+    known: Sequence[Concept]
     unknown: Sequence[ConceptMention]
+    tools: Sequence[BaseTool]
 
 
 class AskStrategy(ABC):
-    def __init__(self, llm: LLMProvider, max_tokens: int) -> None:
-        self._llm = llm
-        self._max_tokens = max_tokens
+    """Base class for /ask response strategies. Each subclass owns its
+    own system prompt; all strategies share the same tool-enabled
+    answerer and may pass tools through to it."""
+
+    def __init__(self, answerer: ToolEnabledAnswerer) -> None:
+        self._answerer = answerer
 
     @abstractmethod
     async def answer(self, context: StrategyContext) -> str: ...
@@ -34,7 +40,13 @@ def format_retrieved_context(retrieved: Sequence[RetrievedChunk]) -> str:
     )
 
 
-def format_known_concepts(known: Sequence[ConceptMention]) -> str:
+def format_known_concepts(known: Sequence[Concept]) -> str:
     if not known:
         return "(none)"
-    return ", ".join(f'"{c.display_name}"' for c in known)
+    return ", ".join(f'"{c.display_name}" (score={c.known_score})' for c in known)
+
+
+def format_unknown_concepts(unknown: Sequence[ConceptMention]) -> str:
+    if not unknown:
+        return "(none)"
+    return ", ".join(f'"{c.display_name}"' for c in unknown)

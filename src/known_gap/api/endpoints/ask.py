@@ -36,11 +36,16 @@ async def ask(
         ],
         mode=cast(AskMode, result.mode),
         known_concepts=[
-            ConceptView(canonical_name=c.canonical_name, display_name=c.display_name)
+            ConceptView(
+                canonical_name=c.canonical_name,
+                display_name=c.display_name,
+                known_score=c.known_score,
+            )
             for c in result.known_concepts
         ],
         unknown_concepts=[
             ConceptView(canonical_name=c.canonical_name, display_name=c.display_name)
             for c in result.unknown_concepts
         ],
+        cloze_concepts=result.cloze_concepts,
     )
