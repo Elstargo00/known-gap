@@ -87,50 +87,74 @@ double-spend on permanent errors).
 
 ## 3. Request Flow (`/ask`)
 
+The `/ask` flow is a **tool-calling loop**: the answering LLM is given a
+small set of read-only graph tools (LangChain `BaseTool` instances) and
+decides at runtime when to call them. The loop terminates when the model
+produces a final text response or hits an iteration cap.
+
 ```mermaid
 sequenceDiagram
     actor Client
     participant API as Cloud Run (FastAPI)
     participant Voyage
-    participant Anthropic
+    participant Anthropic as Anthropic<br/>(Sonnet + tools)
+    participant Opus as Anthropic<br/>(Opus, async)
     participant Postgres
     participant FalkorDB
 
     Client->>API: POST /ask (Bearer JWT)<br/>{ query, mode }
     API->>API: verify JWT → user_id (UUID)
 
-    alt mode = learning or concise
-        par classify query concepts
-            API->>Anthropic: complete (Haiku, JSON concepts)
-            Anthropic-->>API: mentions
-        and embed query
-            API->>Voyage: embed_query
-            Voyage-->>API: vector
-        end
-        API->>FalkorDB: find_known(user_id, names)
-        FalkorDB-->>API: {known names}
-    else mode = normal
+    par embed query
         API->>Voyage: embed_query
         Voyage-->>API: vector
+    and extract question concepts
+        API->>Anthropic: complete (Haiku, JSON concepts)
+        Anthropic-->>API: mentions
     end
+    API->>FalkorDB: get_concepts(user_id, names)<br/>→ classify by known_score
+    FalkorDB-->>API: scored concepts
 
     API->>Postgres: search_similar(vector, k=10)
     Postgres-->>API: top-k chunks (cosine)
 
-    API->>Anthropic: strategy.answer(context)
-    Anthropic-->>API: answer text
+    rect rgb(245,245,250)
+        note right of API: tool-calling loop (max N iterations)
+        loop until final answer
+            API->>Anthropic: messages.create(tools=[graph tools])
+            Anthropic-->>API: tool_use block
+            API->>FalkorDB: tool dispatch<br/>(neighborhood / path / lookup)
+            FalkorDB-->>API: JSON result
+        end
+        Anthropic-->>API: final answer text
+    end
 
-    API->>Anthropic: extract concepts from answer (Haiku)
+    API->>Anthropic: extract answer concepts (Haiku)
     Anthropic-->>API: mentions
-    API->>FalkorDB: upsert_concepts(user_id, mentions)
-    FalkorDB-->>API: ok
+    API->>FalkorDB: upsert_concepts(score=0 if new)
+    API->>FalkorDB: adjust_scores (re-asked −, introduced +)
+    Note over API: cloze-process answer<br/>(mask concepts with score>50)
 
-    API-->>Client: { answer, sources, mode, known, unknown }
+    API-->>Client: { answer, sources, mode, known,<br/>unknown, cloze_concepts }
+
+    par background graph expansion
+        API->>Opus: propose new typed edges<br/>around touched concepts
+        Opus-->>API: { new_concepts, relations }
+        API->>FalkorDB: upsert + add_relations
+    end
 ```
 
-The graph write on the return trip is **synchronous** by design — the user's
-graph always reflects the exchange they just saw, which is the whole premise
-of the service.
+The synchronous-write contract is preserved for **score updates and node
+upserts**: by the time `/ask` returns, the user's graph already reflects the
+exchange (so the next call sees the new scores). The **graph expander** is
+fire-and-forget: it asks an Opus-class model to densify the graph with new
+typed edges and runs in `asyncio.create_task` after the response is sent.
+
+Each strategy (`normal`, `learning`, `concise`) reuses the same tool-enabled
+answerer; only the system prompt changes. `learning` mode additionally runs
+the `cloze_processor` over the final text to mask the concepts the user
+already owns (`known_score > 50`) as `<cloze concept="…">…</cloze>` spans —
+the frontend renders those as fill-in-the-blanks.
 
 ---
 
@@ -164,19 +188,20 @@ flowchart TB
     subgraph application["application/"]
         usecases["use_cases/<br/>ask · ingest_document"]
         strategies["strategies/<br/>normal · learning · concise"]
-        services["services/<br/>chunker · concept_extractor<br/>knowledge_classifier<br/>answer_post_processor"]
+        services["services/<br/>chunker · concept_extractor<br/>knowledge_classifier<br/>tool_enabled_answerer<br/>cloze_processor · score_updater<br/>graph_expander · answer_post_processor"]
+        tools["tools/<br/>graph_tools (LangChain @tool)"]
     end
 
     subgraph domain["domain/ — pure, no external deps"]
-        models["models/"]
+        models["models/<br/>Concept · ConceptRelation<br/>ConceptNeighborhood"]
         repos["repositories/ (ports)"]
-        domservices["services/<br/>LLMProvider · EmbeddingProvider<br/>DocumentParser (ports)"]
+        domservices["services/<br/>LLMProvider · EmbeddingProvider<br/>DocumentParser · GraphExpert (ports)"]
     end
 
     subgraph infra["infrastructure/ — adapters"]
         db["db/<br/>Postgres · pgvector"]
         emb["embeddings/ (Voyage)"]
-        llm["llm/<br/>Anthropic · Gemini · Fallback · Factory"]
+        llm["llm/<br/>Anthropic · Gemini · Fallback · Factory<br/>AnthropicGraphExpert"]
         graph["graph/ (FalkorDB)"]
         parsing["parsing/ (pdf/md/txt)"]
         auth["auth/ (JWT verifier)"]
@@ -186,7 +211,10 @@ flowchart TB
     deps --> usecases
     usecases --> strategies
     usecases --> services
+    usecases --> tools
     services --> domservices
+    services --> repos
+    tools --> repos
     usecases --> repos
     db -. implements .-> repos
     graph -. implements .-> repos
@@ -208,12 +236,33 @@ Voyage, Anthropic, and FalkorDB swappable.
 | Pattern | Where it lives | Why |
 | --- | --- | --- |
 | **Repository** | `domain/repositories/{document,chunk,user_graph}_repository.py` · `infrastructure/db/postgres_*.py` · `infrastructure/graph/falkordb_user_graph_repository.py` | Storage engines (Postgres / FalkorDB) never leak into application or domain code |
-| **Factory** | `infrastructure/embeddings/factory.py` · `infrastructure/llm/factory.py` | Selects and composes providers from settings. `LLMProviderFactory` has two entry points (`from_settings` for generation, `for_concept_extraction` for Haiku) so each use case gets the right-sized model |
-| **Strategy** | `application/strategies/{base,normal,learning,concise}.py` | Each mode owns its own prompt and its response shape. Adding a mode is a new file plus a `dict` entry in DI — no handler changes |
+| **Factory** | `infrastructure/embeddings/factory.py` · `infrastructure/llm/factory.py` | Selects and composes providers from settings. `LLMProviderFactory` has three entry points (`from_settings` for answering, `for_concept_extraction` for Haiku, `for_graph_expert` for Opus) so each use case gets the right-sized model |
+| **Strategy** | `application/strategies/{base,normal,learning,concise}.py` | Each mode owns its own prompt; all share the same tool-enabled answerer. Adding a mode is a new file plus a `dict` entry in DI — no handler changes |
+| **Tool (LangChain)** | `application/tools/graph_tools.py` | Graph operations (`lookup_user_known_concepts`, `get_concept_neighborhood`, `find_path_between_concepts`) are exposed as portable LangChain `BaseTool`s, bound to a per-request `(graph, user_id)` context. Any LangChain-speaking runtime can pick them up |
+| **Background task** | `application/services/graph_expander.py` | The Graph Expert (Opus) runs in `asyncio.create_task` after the user-facing response is sent, so densification cost never lands on the request critical path |
 
 A **fallback decorator** (`infrastructure/llm/fallback_provider.py`) wraps the
 primary LLM with a secondary and only retries on `TransientException` —
-permanent errors propagate so the caller fails fast.
+permanent errors propagate so the caller fails fast. The `ToolEnabledAnswerer`
+also degrades gracefully: on transient Anthropic failure during the tool
+loop it falls back to a plain (no-tools) completion via the same fallback
+chain.
+
+### Tool-calling loop
+
+`ToolEnabledAnswerer` runs Anthropic's native `messages.create(tools=…)` API
+in a loop:
+
+1. Call the model with the system prompt, conversation, and tool schemas
+   (LangChain tools converted to Anthropic's input-schema format).
+2. If the model returns `stop_reason="tool_use"`, dispatch each tool call
+   asynchronously, append the results to `messages`, and loop.
+3. Otherwise return the assembled text.
+
+The model is in charge — it decides whether to call any tools, in which
+order, and with what arguments. The tools themselves are read-only;
+graph **writes** stay on the deterministic post-answer path so prompt
+injection cannot corrupt a user's graph.
 
 ---
 
@@ -248,22 +297,43 @@ user. Only the knowledge graph is per-user.
 
 ### FalkorDB (knowledge graph)
 
-One graph per user, named `user_<uuid.hex>`. Single node label:
+One graph per user, named `user_<uuid.hex>`. A single node label and a
+single edge label, both written via OpenCypher:
 
 ```cypher
 (:Concept {
-    canonical_name:     string,   // lowercased, trimmed — the identity
-    display_name:       string,
-    description:        string,
-    domain:             string | null,
-    confidence:         float,    // 0.3 on first mention, +0.1 on re-mention, capped at 1.0
-    times_encountered:  int,
-    first_seen:         timestamp,
-    last_seen:          timestamp
+    canonical_name: string,   // lowercased, trimmed — the identity
+    display_name:   string,
+    description:    string,
+    domain:         string | null,
+    known_score:    int,      // [0, 100], clamped on every write
+    first_seen:     timestamp,
+    last_seen:      timestamp
 })
+
+(a:Concept)-[:RELATES_TO {
+    relation_type: string,   // "is_a" / "uses" / "depends_on" / ...
+    rationale:     string,   // one-line LLM justification
+    created_at:    timestamp
+}]->(b:Concept)
 ```
 
-No edges yet — concepts-only is enough for v1 (see §9).
+`known_score` lives in `[0, 100]` and is the heart of the system:
+
+- **0** on first sight (extracted from a doc or answer).
+- **+`KNOWN_SCORE_INCREMENT`** when a concept is introduced via an
+  answer the user did not ask about — this is reinforcement.
+- **−`KNOWN_SCORE_DECREMENT`** when a concept is **re-asked** while
+  already known (`> KNOWN_SCORE_THRESHOLD`) — the user appears to have
+  forgotten, so we drop the score.
+- **`> KNOWN_SCORE_THRESHOLD`** (default 50) is the boundary at which
+  a concept becomes a candidate for cloze masking.
+
+Edges are typed and directed; the `relation_type` is **LLM-defined**
+(snake_case verb phrases) and stored as a property so Cypher queries
+remain fully parameterizable. The schema deliberately uses a single
+edge label so traversal-on-anything queries (`MATCH (a)-[:RELATES_TO]-`)
+stay simple while the *semantics* live in the property.
 
 ---
 
@@ -291,15 +361,17 @@ carries the venv plus `src/` and `main.py`, and drops to a non-root user.
   merging across chunks). Comparing the user's graph to the ideal graph for a
   document surfaces concrete "what you haven't seen yet" gaps — the natural
   next workflow on top of the infrastructure already in place.
-- **Triples, not just concepts.** Extracting `(subject, predicate, object)`
-  triples instead of bare concepts yields relationships. That makes the "gap"
-  analysis richer (missing connections, not just missing nodes) and makes
-  learning-mode tagging smarter (the LLM could mark entire known-relations).
 - **Concept embeddings + fuzzy match.** `"recursion"` and `"recursive
   function"` are the same concept under any reasonable reader; exact-name
   matching misses this. Add a concept-embedding index in pgvector (or
   FalkorDB's vector index) and use cosine similarity before declaring a
   concept "unknown".
+- **LangSmith tracing.** Tools are already LangChain-native; switching the
+  answerer to `langchain-anthropic.ChatAnthropic.bind_tools()` enables
+  full LangSmith traces for free. Enable when the cost is justified.
+- **MCP server.** The same tool surface can be exposed via the Model
+  Context Protocol so other LLM clients (Claude Desktop, IDE agents)
+  talk to the user's knowledge graph directly.
 - **Rich JWT enforcement.** Verify `iss` and `aud`, support RS256 with a
   JWKS-rotated public key, and gate `/ingest` by a separate role if the
   corpus becomes truly shared.
@@ -310,13 +382,20 @@ carries the venv plus `src/` and `main.py`, and drops to a non-root user.
 
 ## 10. Known Limitations
 
-- **Synchronous graph writes** land the FalkorDB upsert on the critical path
-  of every `/ask`. Acceptable for the project's scale; would become a tail-
-  latency issue in production.
+- **Synchronous score updates** land the FalkorDB write on the critical path
+  of every `/ask`. Edge densification (the expensive part) is already
+  background; node upserts and score adjustments are kept synchronous so the
+  next call sees consistent state.
 - **Concept extraction quality** is bounded by the LLM. No rule-based NER
   fallback; malformed JSON raises `CONCEPT_EXTRACTION_PARSE_ERROR`.
 - **Exact canonical-name matching** misses near-synonyms — see §9's fuzzy
   match note.
+- **Tool-calling cost.** Each `/ask` may make multiple Anthropic round-trips
+  if the model decides to use tools repeatedly. The `TOOL_MAX_ITERATIONS`
+  setting bounds the worst case.
+- **Graph expert is fire-and-forget.** A failure (or a slow Opus run) does
+  not block the response, but it also produces no visible error to the user.
+  Surface async-task health via Cloud Monitoring once observability lands.
 - **No rate limiting or per-user quota** on either endpoint.
 - **Embedding batch size** is bounded by settings; a very large document
   still makes one Voyage request per batch sequentially.
