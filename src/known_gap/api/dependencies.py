@@ -108,6 +108,7 @@ def get_ingest_handler(
         concept_extractor=extractor,
         graph=graph_repo,
         graph_expander=_build_graph_expander(settings, graph_repo),
+        initial_score=settings.known_score_initial,
     )
 
 

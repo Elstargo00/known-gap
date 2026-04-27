@@ -45,6 +45,7 @@ class IngestDocumentHandler:
         concept_extractor: ConceptExtractor,
         graph: UserGraphRepository,
         graph_expander: GraphExpander,
+        initial_score: int = 50,
     ) -> None:
         self._parser = parser
         self._chunker = chunker
@@ -54,6 +55,7 @@ class IngestDocumentHandler:
         self._concept_extractor = concept_extractor
         self._graph = graph
         self._graph_expander = graph_expander
+        self._initial_score = initial_score
 
     async def execute(self, command: IngestDocumentCommand) -> IngestDocumentResult:
         text = self._parser.parse(command.filename, command.data)
@@ -89,8 +91,8 @@ class IngestDocumentHandler:
         await self._chunks.save_many(persisted_chunks)
 
         # Best-effort graph seeding: extract concepts from the (capped)
-        # full text, upsert them with score=0 in the user's graph, and
-        # fire off the graph expander in the background.
+        # full text, upsert them with the configured initial score in the
+        # user's graph, and fire off the graph expander in the background.
         try:
             await self._seed_graph(command.user_id, text)
         except Exception:  # noqa: BLE001 — ingest must succeed even if the graph side fails
@@ -115,7 +117,9 @@ class IngestDocumentHandler:
         mentions = await self._concept_extractor.extract(snippet)
         if not mentions:
             return
-        await self._graph.upsert_concepts(user_id, mentions, initial_score=0)
+        await self._graph.upsert_concepts(
+            user_id, mentions, initial_score=self._initial_score
+        )
         seed_canonicals = [m.canonical_name for m in mentions]
         if seed_canonicals:
             asyncio.create_task(self._graph_expander.expand(user_id, seed_canonicals))
