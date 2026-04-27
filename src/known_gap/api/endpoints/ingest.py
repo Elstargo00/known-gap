@@ -19,7 +19,7 @@ UploadedFile = Annotated[UploadFile, File(...)]
 async def ingest(
     handler: IngestHandlerDep,
     settings: SettingsDep,
-    user_id: CurrentUserId,  # noqa: ARG001 — auth gate; documents are global
+    user_id: CurrentUserId,
     file: UploadedFile,
 ) -> IngestResponse:
     if not file.filename:
@@ -41,6 +41,7 @@ async def ingest(
         )
 
     command = IngestDocumentCommand(
+        user_id=user_id,
         filename=file.filename,
         content_type=file.content_type or "application/octet-stream",
         data=data,

@@ -15,6 +15,10 @@ class LLMProviderFactory:
         return LLMProviderFactory._build(settings, settings.concept_extraction_model)
 
     @staticmethod
+    def for_graph_expert(settings: Settings) -> LLMProvider:
+        return LLMProviderFactory._build(settings, settings.graph_expert_model)
+
+    @staticmethod
     def _build(settings: Settings, primary_model: str) -> LLMProvider:
         if not settings.anthropic_api_key:
             raise ValueError("ANTHROPIC_API_KEY is required for the primary LLM provider")

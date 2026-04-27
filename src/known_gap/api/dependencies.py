@@ -1,13 +1,18 @@
 from typing import Annotated
 from uuid import UUID
 
+from anthropic import AsyncAnthropic
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from src.known_gap.application.services.answer_post_processor import AnswerPostProcessor
 from src.known_gap.application.services.chunker import Chunker
+from src.known_gap.application.services.cloze_processor import ClozeProcessor
 from src.known_gap.application.services.concept_extractor import ConceptExtractor
+from src.known_gap.application.services.graph_expander import GraphExpander
 from src.known_gap.application.services.knowledge_classifier import KnowledgeClassifier
+from src.known_gap.application.services.score_updater import ScoreUpdater
+from src.known_gap.application.services.tool_enabled_answerer import ToolEnabledAnswerer
 from src.known_gap.application.strategies.base import AskStrategy
 from src.known_gap.application.strategies.concise import ConciseStrategy
 from src.known_gap.application.strategies.learning import LearningStrategy
@@ -24,6 +29,7 @@ from src.known_gap.infrastructure.embeddings.factory import EmbeddingProviderFac
 from src.known_gap.infrastructure.graph.falkordb_user_graph_repository import (
     FalkorDBUserGraphRepository,
 )
+from src.known_gap.infrastructure.llm.anthropic_graph_expert import AnthropicGraphExpert
 from src.known_gap.infrastructure.llm.factory import LLMProviderFactory
 from src.known_gap.infrastructure.parsing.document_parser import DispatchingDocumentParser
 from src.known_gap.shared.exceptions.base import AppException
@@ -63,11 +69,33 @@ def get_current_user_id(
 CurrentUserId = Annotated[UUID, Depends(get_current_user_id)]
 
 
+def _build_graph_expander(
+    settings: Settings, graph_repo: FalkorDBUserGraphRepository
+) -> GraphExpander:
+    expert_llm = LLMProviderFactory.for_graph_expert(settings)
+    expert = AnthropicGraphExpert(
+        llm=expert_llm,
+        max_tokens=settings.graph_expert_max_tokens,
+    )
+    return GraphExpander(
+        graph=graph_repo,
+        expert=expert,
+        max_per_seed=settings.graph_expert_degree,
+    )
+
+
 def get_ingest_handler(
     request: Request,
     settings: SettingsDep,
 ) -> IngestDocumentHandler:
     pool = request.app.state.pool
+    graph_client = request.app.state.graph_client
+    graph_repo = FalkorDBUserGraphRepository(graph_client)
+    concept_llm = LLMProviderFactory.for_concept_extraction(settings)
+    extractor = ConceptExtractor(
+        llm=concept_llm,
+        max_tokens=settings.concept_extraction_max_tokens,
+    )
     return IngestDocumentHandler(
         parser=DispatchingDocumentParser(),
         chunker=Chunker(
@@ -77,6 +105,10 @@ def get_ingest_handler(
         embedder=EmbeddingProviderFactory.from_settings(settings),
         documents=PostgresDocumentRepository(pool),
         chunks=PostgresChunkRepository(pool),
+        concept_extractor=extractor,
+        graph=graph_repo,
+        graph_expander=_build_graph_expander(settings, graph_repo),
+        initial_score=settings.known_score_initial,
     )
 
 
@@ -86,29 +118,63 @@ def get_ask_handler(
 ) -> AskHandler:
     pool = request.app.state.pool
     graph_client = request.app.state.graph_client
+    graph_repo = FalkorDBUserGraphRepository(graph_client)
 
-    generation_llm = LLMProviderFactory.from_settings(settings)
+    if not settings.anthropic_api_key:
+        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY is required")
+    anthropic_client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+    fallback_llm = LLMProviderFactory.from_settings(settings)
+    answerer = ToolEnabledAnswerer(
+        client=anthropic_client,
+        model=settings.llm_primary_model,
+        max_tokens=settings.answer_max_tokens,
+        max_iterations=settings.tool_max_iterations,
+        fallback_llm=fallback_llm,
+    )
+
     concept_llm = LLMProviderFactory.for_concept_extraction(settings)
-
     extractor = ConceptExtractor(
         llm=concept_llm,
         max_tokens=settings.concept_extraction_max_tokens,
     )
-    graph_repo = FalkorDBUserGraphRepository(graph_client)
+
+    classifier = KnowledgeClassifier(
+        extractor=extractor,
+        graph=graph_repo,
+        threshold=settings.known_score_threshold,
+    )
+    post_processor = AnswerPostProcessor(
+        extractor=extractor,
+        graph=graph_repo,
+        initial_score=settings.known_score_initial,
+    )
+    score_updater = ScoreUpdater(
+        graph=graph_repo,
+        threshold=settings.known_score_threshold,
+        increment=settings.known_score_increment,
+        decrement=settings.known_score_decrement,
+    )
+    cloze_processor = ClozeProcessor(threshold=settings.known_score_threshold)
+    graph_expander = _build_graph_expander(settings, graph_repo)
 
     strategies: dict[str, AskStrategy] = {
-        "normal": NormalStrategy(llm=generation_llm, max_tokens=settings.answer_max_tokens),
-        "learning": LearningStrategy(llm=generation_llm, max_tokens=settings.answer_max_tokens),
-        "concise": ConciseStrategy(llm=generation_llm, max_tokens=settings.answer_max_tokens),
+        "normal": NormalStrategy(answerer=answerer),
+        "learning": LearningStrategy(answerer=answerer),
+        "concise": ConciseStrategy(answerer=answerer),
     }
 
     return AskHandler(
         embedder=EmbeddingProviderFactory.from_settings(settings),
         chunks=PostgresChunkRepository(pool),
-        classifier=KnowledgeClassifier(extractor=extractor, graph=graph_repo),
-        post_processor=AnswerPostProcessor(extractor=extractor, graph=graph_repo),
+        graph_repo=graph_repo,
+        classifier=classifier,
+        post_processor=post_processor,
+        score_updater=score_updater,
+        cloze_processor=cloze_processor,
+        graph_expander=graph_expander,
         strategies=strategies,
         top_k=settings.top_k,
+        graph_tool_max_hops=settings.concept_neighborhood_max_hops,
     )
 
 

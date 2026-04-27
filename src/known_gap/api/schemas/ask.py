@@ -22,6 +22,7 @@ class Source(BaseModel):
 class ConceptView(BaseModel):
     canonical_name: str
     display_name: str
+    known_score: int = 0
 
 
 class AskResponse(BaseModel):
@@ -30,3 +31,7 @@ class AskResponse(BaseModel):
     mode: AskMode
     known_concepts: list[ConceptView] = Field(default_factory=list)
     unknown_concepts: list[ConceptView] = Field(default_factory=list)
+    # Canonical names that the answer was masked on for learning-mode
+    # cloze fill-in-the-blanks. Frontend renders <cloze ...> tags
+    # embedded inline in `answer`. Empty when mode != "learning".
+    cloze_concepts: list[str] = Field(default_factory=list)

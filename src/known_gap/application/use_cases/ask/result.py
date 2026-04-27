@@ -15,6 +15,7 @@ class AskSource:
 class AskConcept:
     canonical_name: str
     display_name: str
+    known_score: int = 0
 
 
 @dataclass(frozen=True)
@@ -24,3 +25,4 @@ class AskResult:
     mode: str
     known_concepts: list[AskConcept] = field(default_factory=list)
     unknown_concepts: list[AskConcept] = field(default_factory=list)
+    cloze_concepts: list[str] = field(default_factory=list)
