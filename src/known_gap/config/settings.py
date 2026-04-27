@@ -35,6 +35,18 @@ class Settings(BaseSettings):
     concept_extraction_model: str = "claude-haiku-4-5-20251001"
     concept_extraction_max_tokens: int = 1024
 
+    graph_expert_model: str = "claude-opus-4-7"
+    graph_expert_max_tokens: int = 2048
+    graph_expert_degree: int = 3
+
+    known_score_threshold: int = 50
+    known_score_increment: int = 10
+    known_score_decrement: int = 10
+    known_score_initial: int = 0
+
+    concept_neighborhood_max_hops: int = 2
+    tool_max_iterations: int = 6
+
     falkordb_host: str = "localhost"
     falkordb_port: int = 6379
     falkordb_username: str = ""
