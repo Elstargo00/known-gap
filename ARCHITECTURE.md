@@ -29,13 +29,8 @@ what the user is known to have seen before.
   ║  │ keys, JWT_SECRET   │      │   FastAPI · asyncio  │         └────────────────────┘║
   ║  └────────────────────┘      │   min=1   max=10     │                               ║
   ║                              └──────────┬───────────┘                               ║
-  ║                                         │ private IP                                ║
-  ║                                         ▼                                           ║
-  ║                              ┌──────────────────────┐                               ║
-  ║                              │ Serverless VPC       │                               ║
-  ║                              │ Access Connector     │                               ║
-  ║                              └──────────┬───────────┘                               ║
-  ║                                         │                                           ║
+  ║                                         │ Cloud SQL Auth Proxy                      ║
+  ║                                         │ (Unix socket, IAM + TLS)                  ║
   ║                                         ▼                                           ║
   ║                              ╔══════════════════════╗                               ║
   ║                              ║  Cloud SQL           ║                               ║
@@ -58,9 +53,11 @@ what the user is known to have seen before.
   ╚═════════════════════════════════════════════════════════════════════════════════════╝
 ```
 
-The deployable unit is a single Cloud Run service. Postgres is inside the VPC
-and only reachable from Cloud Run via a Serverless VPC Access Connector (no
-public IP). Everything else is a third-party HTTPS dependency.
+The deployable unit is a single Cloud Run service. Cloud Run reaches Cloud
+SQL through the **Cloud SQL Auth Proxy** — a Unix socket mounted into the
+container by the `--add-cloudsql-instances` flag, proxied through Google's
+managed network with IAM + TLS. No VPC connector or peering is involved.
+Everything else is a third-party HTTPS dependency.
 
 ---
 
@@ -75,7 +72,7 @@ the assignment: **availability**, **scalability**, **cost optimisation**.
 | Relational + vectors | **Cloud SQL (Postgres 17)** | `documents`, `chunks`, HNSW index over `VECTOR(1024)` | Single-zone for demo; flip to HA (regional) for prod with one setting | Start `db-f1-micro` / `db-g1-small`; vertical bump or read replicas later | Smallest burstable tier is adequate for demo traffic |
 | Container images | **Artifact Registry** | Versioned Docker images built in CI | Regional, GA | N/A — cold storage | Per-GB-month; trivial for a single image |
 | Secrets | **Secret Manager** | API keys, `JWT_SECRET`, DB password | Replicated automatically | N/A | Per-secret-version; handful of secrets |
-| Private path | **Serverless VPC Access Connector** | Only way Cloud Run can reach Cloud SQL over private IP | Fully managed | Auto throughput scale | Per-hour + per-GB; small but non-zero idle cost |
+| Cloud SQL connection | **Cloud SQL Auth Proxy** (built into Cloud Run via `--add-cloudsql-instances`) | Mounts a Unix socket at `/cloudsql/<conn>` that proxies to Cloud SQL through Google's managed network with IAM + TLS | Managed by Cloud Run | Auto-scales with the service | No extra charge — included in Cloud Run runtime |
 | Observability | **Cloud Logging / Monitoring** | Structured stdout/stderr + built-in metrics | GA | N/A | Pay-per-GB-ingested |
 | Knowledge graph | **FalkorDB Cloud** (external) | Per-user Concept graphs, OpenCypher queries | Vendor SLA | Vendor-managed vertical scale | Vendor pricing; isolated from GCP cost |
 
