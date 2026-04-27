@@ -1,27 +1,31 @@
 # Known Gap
 
 A knowledge-gap-aware Q&A service. `/ask` accepts a `mode` — **normal**,
-**learning**, or **concise** — and tailors the answer to what each user is
-known to have seen before by combining a pgvector RAG pipeline with a
-per-user FalkorDB knowledge graph.
+**learning**, or **concise** — and tailors the answer to what each user has
+already mastered, by combining a pgvector RAG pipeline with a per-user
+**typed knowledge graph** on FalkorDB.
+
+Each concept node carries a `known_score` (0–100) that moves with every
+exchange: re-asking something you've already mastered nudges it down,
+encountering a new concept inside an answer nudges it up. Concepts above a
+configurable threshold get masked as **fill-in-the-blank cloze deletions**
+in learning mode, so the answer trains recall on what you already know.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the deployment topology, design
-patterns, and data model.
+patterns, sequence diagrams, and data model.
 
 ## Features
 
 - `POST /ingest` — upload `.pdf`, `.md`, or `.txt` files; extracted text is
-  chunked, embedded with Voyage, and stored in Postgres + pgvector.
+  chunked, embedded with Voyage, and stored in Postgres + pgvector. The user's
+  graph is also seeded with concepts extracted from the document.
 - `POST /ask` with three modes:
-  - **normal** — standard RAG answer, no graph lookup.
-  - **learning** — full answer with `<known>` inline tags over concepts the
-    user already has in their graph, so the UI can de-emphasise them.
-  - **concise** — skips re-explaining anything the user already knows.
-- Per-user knowledge graph on FalkorDB; every answer post-updates the graph.
-- LLM provider **factory** with Anthropic primary and Gemini fallback on
-  transient errors only.
-- **Strategy** pattern for modes, **Repository** pattern for Postgres and
-  FalkorDB, all testable against pure domain ports.
+  - **normal** — standard RAG answer.
+  - **learning** — full answer with concepts whose `known_score` is above the
+    threshold wrapped in `<cloze concept="…">…</cloze>` tags so the UI can
+    render them as click-to-reveal blanks.
+  - **concise** — skips re-explaining anything already mastered, told to the
+    LLM via the system prompt.
 
 ## Prerequisites
 
@@ -47,7 +51,7 @@ cp .env.example .env
 docker compose up --build
 
 # 4. Service is at http://localhost:8001
-#    FalkorDB browser UI at http://localhost:3000
+#    FalkorDB browser UI at http://localhost:3001 (Redis on 6380)
 #    Postgres on host port 5433
 ```
 
@@ -80,35 +84,14 @@ curl -X POST http://localhost:8001/ingest \
   -F "file=@data/sample.pdf"
 ```
 
-Response:
-```json
-{ "document_id": "…", "filename": "sample.pdf", "chunk_count": 12 }
-```
-
 ### `POST /ask`
 
 ```bash
 curl -X POST http://localhost:8001/ask \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"query": "What is recursion?", "mode": "learning"}'
+  -d '{"query": "How do I subclass Sequence from collections.abc?", "mode": "learning"}'
 ```
-
-Response (shape):
-```json
-{
-  "answer": "Recursion is a technique where <known concept=\"function\">a function</known> calls itself…",
-  "sources": [
-    { "chunk_id": "…", "document_id": "…", "filename": "intro.md",
-      "content_preview": "…", "similarity_score": 0.87 }
-  ],
-  "mode": "learning",
-  "known_concepts":   [{ "canonical_name": "function", "display_name": "Function" }],
-  "unknown_concepts": [{ "canonical_name": "base case", "display_name": "Base case" }]
-}
-```
-
-`known_concepts` and `unknown_concepts` are empty on `mode="normal"`.
 
 ## Environment Variables
 
@@ -117,17 +100,24 @@ See [`.env.example`](./.env.example) for the full list with defaults. Keys you
 
 | Variable | Purpose |
 |---|---|
-| `ANTHROPIC_API_KEY` | Primary LLM (Sonnet 4.6) and concept extraction (Haiku) |
+| `ANTHROPIC_API_KEY` | Primary answer LLM (Sonnet) + concept extraction (Haiku) + Graph Expert (Opus) |
 | `VOYAGE_API_KEY` | Embeddings (`voyage-3`, 1024-dim) |
-| `JWT_SECRET` | HS256 shared secret (≥ 32 bytes) |
+| `JWT_SECRET` | HS256 shared secret (≥ 32 bytes) — must match the frontend |
 
 Optional:
 
-| Variable | Purpose |
-|---|---|
-| `GEMINI_API_KEY` | Transient-failure fallback for the Anthropic provider |
-| `TOP_K` | Retrieval cutoff (default `10`) |
-| `LLM_PRIMARY_MODEL` / `LLM_FALLBACK_MODEL` / `CONCEPT_EXTRACTION_MODEL` | Model overrides |
+| Variable | Default | Purpose |
+|---|---|---|
+| `GEMINI_API_KEY` | — | Transient-failure fallback for Anthropic |
+| `TOP_K` | `10` | pgvector retrieval cutoff |
+| `LLM_PRIMARY_MODEL` / `LLM_FALLBACK_MODEL` / `CONCEPT_EXTRACTION_MODEL` / `GRAPH_EXPERT_MODEL` | see `.env.example` | Model overrides |
+| `KNOWN_SCORE_THRESHOLD` | `50` | A concept is "known" when `known_score > THRESHOLD` (strictly above). Drives cloze masking. |
+| `KNOWN_SCORE_INITIAL` | `60` | First-exposure score for concepts the user has actually been shown (answer-introduced and ingested). Set above the threshold so a topic-of-the-question concept is classified known on the next turn. |
+| `KNOWN_SCORE_INCREMENT` | `10` | Bump applied to answer-only concepts. |
+| `KNOWN_SCORE_DECREMENT` | `10` | Penalty applied to re-asked already-known concepts. |
+| `GRAPH_EXPERT_DEGREE` | `3` | Max relations the Graph Expert proposes per seed concept. |
+| `CONCEPT_NEIGHBORHOOD_MAX_HOPS` | `2` | Max hops when the LLM calls `get_concept_neighborhood`. |
+| `TOOL_MAX_ITERATIONS` | `6` | Hard cap on the answerer's tool-calling loop. |
 
 ## Development Workflow
 
@@ -136,7 +126,7 @@ uv sync                        # install from uv.lock
 uv run ruff check --fix .      # lint
 uv run ruff format .           # format
 uv run ty check                # type check
-uv run pytest                  # unit tests
+uv run pytest                  # unit tests (57 currently)
 ```
 
 CI runs the same four checks on every push (`.github/workflows/ci.yml`).
@@ -145,25 +135,36 @@ CI runs the same four checks on every push (`.github/workflows/ci.yml`).
 
 ```text
 src/known_gap/
-├── api/                  # FastAPI endpoints, schemas, DI
+├── api/                       # FastAPI endpoints, schemas, DI
 ├── application/
-│   ├── services/         # chunker, concept_extractor, knowledge_classifier,
-│   │                     # answer_post_processor
-│   ├── strategies/       # normal / learning / concise (Strategy pattern)
-│   └── use_cases/        # ask, ingest_document (orchestrators)
+│   ├── services/
+│   │   ├── chunker.py
+│   │   ├── concept_extractor.py
+│   │   ├── knowledge_classifier.py     # partitions mentions into known / unknown by known_score
+│   │   ├── answer_post_processor.py    # extracts answer concepts → upserts into the graph
+│   │   ├── score_updater.py            # +increment / -decrement / clamp [0, 100]
+│   │   ├── cloze_processor.py          # wraps mastered concepts in <cloze> tags
+│   │   ├── graph_expander.py           # background task: GraphExpert → upsert new edges
+│   │   └── tool_enabled_answerer.py    # Anthropic tool-calling loop with fallback
+│   ├── tools/
+│   │   └── graph_tools.py              # LangChain BaseTools for graph lookup / neighbourhood / path
+│   ├── strategies/                     # normal / learning / concise (Strategy pattern)
+│   └── use_cases/                      # ask, ingest_document (orchestrators)
 ├── domain/
-│   ├── models/           # Document, Chunk, Concept, RetrievedChunk, …
-│   ├── repositories/     # ports — no infrastructure imports
-│   └── services/         # LLMProvider, EmbeddingProvider, DocumentParser (ports)
+│   ├── models/                         # Document, Chunk, Concept (with known_score),
+│   │                                   # ConceptMention, ConceptRelation, ConceptNeighborhood, …
+│   ├── repositories/                   # ports — no infrastructure imports
+│   └── services/                       # LLMProvider, EmbeddingProvider, GraphExpert,
+│                                       # DocumentParser (ports)
 ├── infrastructure/
-│   ├── auth/             # JWT verifier
-│   ├── db/               # Postgres adapters + migrations
-│   ├── embeddings/       # Voyage provider + factory
-│   ├── graph/            # FalkorDB adapter
-│   ├── llm/              # Anthropic, Gemini, Fallback, Factory
-│   └── parsing/          # PDF / MD / TXT dispatch
-├── shared/               # exceptions, utils
-└── config/               # settings (pydantic-settings)
+│   ├── auth/                           # JWT verifier
+│   ├── db/                             # Postgres adapters + migrations
+│   ├── embeddings/                     # Voyage provider + factory
+│   ├── graph/                          # FalkorDB adapter (typed edges, score arithmetic)
+│   ├── llm/                            # Anthropic, Gemini, AnthropicGraphExpert, Fallback, Factory
+│   └── parsing/                        # PDF / MD / TXT dispatch
+├── shared/                             # exceptions, utils
+└── config/                             # settings (pydantic-settings)
 ```
 
 ## License
