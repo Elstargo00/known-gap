@@ -10,37 +10,52 @@ what the user is known to have seen before.
 
 ## 1. Deployment Topology
 
-```mermaid
-flowchart TB
-    client["Client<br/>(browser / curl)"]
-
-    subgraph gcp["GCP Project (single region)"]
-        direction TB
-        cr["Cloud Run<br/><b>known-gap-api</b><br/>min=1, max=10"]
-        vpc["Serverless VPC<br/>Access Connector"]
-        sql[("Cloud SQL<br/>Postgres 17<br/>+ pgvector")]
-        ar["Artifact Registry<br/>(container images)"]
-        sm["Secret Manager<br/>(API keys, JWT_SECRET)"]
-        logs["Cloud Logging<br/>/ Monitoring"]
-    end
-
-    subgraph external["External managed services"]
-        direction TB
-        falkor[("FalkorDB Cloud<br/>per-user graphs")]
-        anthropic["Anthropic API<br/>(Sonnet + Haiku)"]
-        gemini["Gemini API<br/>(fallback)"]
-        voyage["Voyage API<br/>(embeddings)"]
-    end
-
-    client -->|HTTPS + Bearer JWT| cr
-    ar -. image pull .-> cr
-    sm -. env injection .-> cr
-    cr -. stdout/stderr .-> logs
-    cr -->|private IP| vpc --> sql
-    cr -->|TLS| falkor
-    cr -->|TLS| anthropic
-    cr -->|TLS| gemini
-    cr -->|TLS| voyage
+```text
+                                  ┌─────────────────────────┐
+                                  │   Client                │
+                                  │   (browser / curl)      │
+                                  └────────────┬────────────┘
+                                               │ HTTPS + Bearer JWT
+                                               ▼
+  ╔════════════════════════════ GCP Project (single region) ════════════════════════════╗
+  ║                                                                                     ║
+  ║  ┌────────────────────┐                                                             ║
+  ║  │ Artifact Registry  │── image pull ─┐                                             ║
+  ║  │ (container images) │               │                                             ║
+  ║  └────────────────────┘               ▼                                             ║
+  ║                              ┌──────────────────────┐         ┌────────────────────┐║
+  ║  ┌────────────────────┐      │   Cloud Run          │ stdout  │ Cloud Logging /    │║
+  ║  │ Secret Manager     │─env─▶│   known-gap-api      │────────▶│ Monitoring         │║
+  ║  │ keys, JWT_SECRET   │      │   FastAPI · asyncio  │         └────────────────────┘║
+  ║  └────────────────────┘      │   min=1   max=10     │                               ║
+  ║                              └──────────┬───────────┘                               ║
+  ║                                         │ private IP                                ║
+  ║                                         ▼                                           ║
+  ║                              ┌──────────────────────┐                               ║
+  ║                              │ Serverless VPC       │                               ║
+  ║                              │ Access Connector     │                               ║
+  ║                              └──────────┬───────────┘                               ║
+  ║                                         │                                           ║
+  ║                                         ▼                                           ║
+  ║                              ╔══════════════════════╗                               ║
+  ║                              ║  Cloud SQL           ║                               ║
+  ║                              ║  Postgres 17         ║                               ║
+  ║                              ║  + pgvector (HNSW)   ║                               ║
+  ║                              ╚══════════════════════╝                               ║
+  ╚═════════════════════════════════════════│═══════════════════════════════════════════╝
+                                            │ TLS  (egress to all four)
+              ┌─────────────────────────────┼─────────────────────────────┐
+              │                             │                             │
+  ╔═══════════▼═════════════════════════════▼═════════════════════════════▼═════════════╗
+  ║                            External managed services                                ║
+  ║                                                                                     ║
+  ║  ╔════════════════╗   ┌──────────────────┐  ┌─────────────┐   ┌─────────────────┐   ║
+  ║  ║  FalkorDB      ║   │  Anthropic API   │  │ Gemini API  │   │  Voyage API     │   ║
+  ║  ║  Cloud         ║   │  Sonnet · Haiku  │  │ (transient  │   │  (embeddings)   │   ║
+  ║  ║  per-user      ║   │  Opus (async)    │  │  fallback)  │   │  voyage-3, 1024 │   ║
+  ║  ║  graphs        ║   └──────────────────┘  └─────────────┘   └─────────────────┘   ║
+  ║  ╚════════════════╝                                                                 ║
+  ╚═════════════════════════════════════════════════════════════════════════════════════╝
 ```
 
 The deployable unit is a single Cloud Run service. Postgres is inside the VPC
@@ -69,7 +84,7 @@ can flip to multi-region / HA by configuration if the demo graduates. FalkorDB
 Cloud availability is an external SLA — an outage there degrades `/ask` but
 does not take the service down (requests to `/ingest` and normal-mode answers
 still succeed if we loosen the graph write; v1 keeps the write mandatory, see
-§9).
+§8).
 
 **Scalability stance.** The hot path is stateless; horizontal scale comes from
 Cloud Run. Read pressure lands on pgvector similarity search — HNSW is already
@@ -85,80 +100,7 @@ double-spend on permanent errors).
 
 ---
 
-## 3. Request Flow (`/ask`)
-
-The `/ask` flow is a **tool-calling loop**: the answering LLM is given a
-small set of read-only graph tools (LangChain `BaseTool` instances) and
-decides at runtime when to call them. The loop terminates when the model
-produces a final text response or hits an iteration cap.
-
-```mermaid
-sequenceDiagram
-    actor Client
-    participant API as Cloud Run (FastAPI)
-    participant Voyage
-    participant Anthropic as Anthropic<br/>(Sonnet + tools)
-    participant Opus as Anthropic<br/>(Opus, async)
-    participant Postgres
-    participant FalkorDB
-
-    Client->>API: POST /ask (Bearer JWT)<br/>{ query, mode }
-    API->>API: verify JWT → user_id (UUID)
-
-    par embed query
-        API->>Voyage: embed_query
-        Voyage-->>API: vector
-    and extract question concepts
-        API->>Anthropic: complete (Haiku, JSON concepts)
-        Anthropic-->>API: mentions
-    end
-    API->>FalkorDB: get_concepts(user_id, names)<br/>→ classify by known_score
-    FalkorDB-->>API: scored concepts
-
-    API->>Postgres: search_similar(vector, k=10)
-    Postgres-->>API: top-k chunks (cosine)
-
-    rect rgb(245,245,250)
-        note right of API: tool-calling loop (max N iterations)
-        loop until final answer
-            API->>Anthropic: messages.create(tools=[graph tools])
-            Anthropic-->>API: tool_use block
-            API->>FalkorDB: tool dispatch<br/>(neighborhood / path / lookup)
-            FalkorDB-->>API: JSON result
-        end
-        Anthropic-->>API: final answer text
-    end
-
-    API->>Anthropic: extract answer concepts (Haiku)
-    Anthropic-->>API: mentions
-    API->>FalkorDB: upsert_concepts(score=0 if new)
-    API->>FalkorDB: adjust_scores (re-asked −, introduced +)
-    Note over API: cloze-process answer<br/>(mask concepts with score>50)
-
-    API-->>Client: { answer, sources, mode, known,<br/>unknown, cloze_concepts }
-
-    par background graph expansion
-        API->>Opus: propose new typed edges<br/>around touched concepts
-        Opus-->>API: { new_concepts, relations }
-        API->>FalkorDB: upsert + add_relations
-    end
-```
-
-The synchronous-write contract is preserved for **score updates and node
-upserts**: by the time `/ask` returns, the user's graph already reflects the
-exchange (so the next call sees the new scores). The **graph expander** is
-fire-and-forget: it asks an Opus-class model to densify the graph with new
-typed edges and runs in `asyncio.create_task` after the response is sent.
-
-Each strategy (`normal`, `learning`, `concise`) reuses the same tool-enabled
-answerer; only the system prompt changes. `learning` mode additionally runs
-the `cloze_processor` over the final text to mask the concepts the user
-already owns (`known_score > 50`) as `<cloze concept="…">…</cloze>` spans —
-the frontend renders those as fill-in-the-blanks.
-
----
-
-## 4. Security & Secrets
+## 3. Security & Secrets
 
 - **JWT.** HS256 with a shared secret between this backend and the frontend
   that mints the token. Required claims: `sub` (user_id UUID), `iat`, `exp`.
@@ -175,63 +117,58 @@ the frontend renders those as fill-in-the-blanks.
 
 ---
 
-## 5. Code Architecture (Clean Architecture + Hexagonal)
+## 4. Code Architecture (Clean Architecture + Hexagonal)
 
-```mermaid
-flowchart TB
-    subgraph api["api/ — HTTP boundary"]
-        endpoints["endpoints/ask.py<br/>endpoints/ingest.py"]
-        schemas["schemas/"]
-        deps["dependencies.py"]
-    end
+Dependencies point **inward**: every layer below depends on the layer
+above it, except `infrastructure`, which only knows the `domain` ports
+it implements.
 
-    subgraph application["application/"]
-        usecases["use_cases/<br/>ask · ingest_document"]
-        strategies["strategies/<br/>normal · learning · concise"]
-        services["services/<br/>chunker · concept_extractor<br/>knowledge_classifier<br/>tool_enabled_answerer<br/>cloze_processor · score_updater<br/>graph_expander · answer_post_processor"]
-        tools["tools/<br/>graph_tools (LangChain @tool)"]
-    end
-
-    subgraph domain["domain/ — pure, no external deps"]
-        models["models/<br/>Concept · ConceptRelation<br/>ConceptNeighborhood"]
-        repos["repositories/ (ports)"]
-        domservices["services/<br/>LLMProvider · EmbeddingProvider<br/>DocumentParser · GraphExpert (ports)"]
-    end
-
-    subgraph infra["infrastructure/ — adapters"]
-        db["db/<br/>Postgres · pgvector"]
-        emb["embeddings/ (Voyage)"]
-        llm["llm/<br/>Anthropic · Gemini · Fallback · Factory<br/>AnthropicGraphExpert"]
-        graph["graph/ (FalkorDB)"]
-        parsing["parsing/ (pdf/md/txt)"]
-        auth["auth/ (JWT verifier)"]
-    end
-
-    endpoints --> deps
-    deps --> usecases
-    usecases --> strategies
-    usecases --> services
-    usecases --> tools
-    services --> domservices
-    services --> repos
-    tools --> repos
-    usecases --> repos
-    db -. implements .-> repos
-    graph -. implements .-> repos
-    emb -. implements .-> domservices
-    llm -. implements .-> domservices
-    parsing -. implements .-> domservices
+```text
+  ┌────────────────────────────────────────────────────────────────────────────────────────┐
+  │  api/  ── HTTP boundary                                                                │
+  │     endpoints/{ask,ingest}.py     schemas/      dependencies.py  (FastAPI Depends)     │
+  └────────────────────────────────────────────┬───────────────────────────────────────────┘
+                                               │ depends on
+                                               ▼
+  ┌────────────────────────────────────────────────────────────────────────────────────────┐
+  │  application/                                                                          │
+  │     use_cases/      ask · ingest_document                                              │
+  │     strategies/     normal · learning · concise        (Strategy pattern)              │
+  │     services/       chunker · concept_extractor · knowledge_classifier                 │
+  │                     tool_enabled_answerer · cloze_processor · score_updater            │
+  │                     graph_expander · answer_post_processor                             │
+  │     tools/          graph_tools  (LangChain @tool — portable)                          │
+  └────────────────────────────────────────────┬───────────────────────────────────────────┘
+                                               │ depends on
+                                               ▼
+  ┌────────────────────────────────────────────────────────────────────────────────────────┐
+  │  domain/  ── pure, no external deps                                                    │
+  │     models/        Concept · ConceptMention · ConceptRelation · ConceptNeighborhood    │
+  │     repositories/  ChunkRepository · DocumentRepository · UserGraphRepository (ports)  │
+  │     services/      LLMProvider · EmbeddingProvider · DocumentParser · GraphExpert      │
+  │                                                                              (ports)   │
+  └────────────────────────────────────────────▲───────────────────────────────────────────┘
+                                               │ implements (dependency inversion)
+                                               │
+  ┌────────────────────────────────────────────┴───────────────────────────────────────────┐
+  │  infrastructure/  ── adapters (no domain leakage)                                      │
+  │     db/           PostgresChunkRepository · PostgresDocumentRepository · pool          │
+  │     embeddings/   VoyageEmbeddingProvider · factory                                    │
+  │     llm/          Anthropic · Gemini · Fallback · Factory · AnthropicGraphExpert       │
+  │     graph/        FalkorDBUserGraphRepository                                          │
+  │     parsing/      DispatchingDocumentParser  (pdf · md · txt)                          │
+  │     auth/         JWTVerifier                                                          │
+  └────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Dependencies point inward: `infrastructure` and `api` depend on `application`
-which depends on `domain`. `domain` never imports from anywhere else. The
-ports in `domain/repositories/` and `domain/services/` are the only
-"contracts" that adapters must satisfy — that's the seam that keeps Postgres,
-Voyage, Anthropic, and FalkorDB swappable.
+`domain` never imports from anywhere else. The ports in
+`domain/repositories/` and `domain/services/` are the only "contracts" that
+adapters must satisfy — that's the seam that keeps Postgres, Voyage,
+Anthropic, and FalkorDB swappable.
 
 ---
 
-## 6. Design Patterns
+## 5. Design Patterns
 
 | Pattern | Where it lives | Why |
 | --- | --- | --- |
@@ -239,7 +176,6 @@ Voyage, Anthropic, and FalkorDB swappable.
 | **Factory** | `infrastructure/embeddings/factory.py` · `infrastructure/llm/factory.py` | Selects and composes providers from settings. `LLMProviderFactory` has three entry points (`from_settings` for answering, `for_concept_extraction` for Haiku, `for_graph_expert` for Opus) so each use case gets the right-sized model |
 | **Strategy** | `application/strategies/{base,normal,learning,concise}.py` | Each mode owns its own prompt; all share the same tool-enabled answerer. Adding a mode is a new file plus a `dict` entry in DI — no handler changes |
 | **Tool (LangChain)** | `application/tools/graph_tools.py` | Graph operations (`lookup_user_known_concepts`, `get_concept_neighborhood`, `find_path_between_concepts`) are exposed as portable LangChain `BaseTool`s, bound to a per-request `(graph, user_id)` context. Any LangChain-speaking runtime can pick them up |
-| **Background task** | `application/services/graph_expander.py` | The Graph Expert (Opus) runs in `asyncio.create_task` after the user-facing response is sent, so densification cost never lands on the request critical path |
 
 A **fallback decorator** (`infrastructure/llm/fallback_provider.py`) wraps the
 primary LLM with a secondary and only retries on `TransientException` —
@@ -266,7 +202,7 @@ injection cannot corrupt a user's graph.
 
 ---
 
-## 7. Data Model
+## 6. Data Model
 
 ### Postgres (RAG corpus)
 
@@ -337,7 +273,7 @@ stay simple while the *semantics* live in the property.
 
 ---
 
-## 8. Build, Ship, Run (CI/CD Outline)
+## 7. Build, Ship, Run (CI/CD Outline)
 
 The GitHub Actions workflow (`.github/workflows/ci.yml`) already runs `uv
 sync`, `ruff`, `ruff format --check`, `ty`, and `pytest` on every push. The
@@ -354,7 +290,7 @@ carries the venv plus `src/` and `main.py`, and drops to a non-root user.
 
 ---
 
-## 9. Future Work
+## 8. Future Work
 
 - **Ideal knowledge graph + gap discovery.** Build an "ideal" graph from the
   same dataset used for ingestion (concept extraction on each chunk, concept
@@ -380,7 +316,7 @@ carries the venv plus `src/` and `main.py`, and drops to a non-root user.
 
 ---
 
-## 10. Known Limitations
+## 9. Known Limitations
 
 - **Synchronous score updates** land the FalkorDB write on the critical path
   of every `/ask`. Edge densification (the expensive part) is already
@@ -388,7 +324,7 @@ carries the venv plus `src/` and `main.py`, and drops to a non-root user.
   next call sees consistent state.
 - **Concept extraction quality** is bounded by the LLM. No rule-based NER
   fallback; malformed JSON raises `CONCEPT_EXTRACTION_PARSE_ERROR`.
-- **Exact canonical-name matching** misses near-synonyms — see §9's fuzzy
+- **Exact canonical-name matching** misses near-synonyms — see §8's fuzzy
   match note.
 - **Tool-calling cost.** Each `/ask` may make multiple Anthropic round-trips
   if the model decides to use tools repeatedly. The `TOOL_MAX_ITERATIONS`
